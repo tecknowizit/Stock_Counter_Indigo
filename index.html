@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0">
+<title>Stock Counter — WestHill Naturals</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2222%22 fill=%22%234C1D95%22/><text x=%2250%22 y=%2266%22 font-size=%2246%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22Arial%22>SC</text></svg>">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+<style>
+/* Only what Bootstrap doesn't cover: status dot, camera preview, and a couple of small touches */
+body{background:#F5F7FA;}
+.dot{width:7px;height:7px;border-radius:50%;background:#94A3B3;display:inline-block;margin-right:5px;}
+.dot-green{background:#10B981;} .dot-red{background:#E11D48;}
+.dot-amber{background:#F59E0B;animation:pulse 1.2s infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.font-mono{font-family:'JetBrains Mono',Consolas,monospace;}
+#scanVideo{width:100%;height:100%;object-fit:cover;background:#000;}
+.min-w-0{min-width:0;}
+.list-group-item.clickable{cursor:pointer;}
+.list-group-item.clickable:hover{background:#F8F5FF;}
+#loadingOverlay{display:none;position:fixed;inset:0;background:rgba(245,247,250,.75);z-index:300;align-items:center;justify-content:center;backdrop-filter:blur(2px);}
+#loadingOverlay.show{display:flex;}
+#toastStack{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:400;width:100%;max-width:420px;}
+</style>
+</head>
+<body>
+
+<div id="connBanner" class="alert alert-warning text-center py-2 mb-0 rounded-0 d-none"></div>
+
+<nav class="navbar navbar-expand bg-white border-bottom sticky-top">
+  <div class="container-fluid" style="max-width:760px;">
+    <span class="navbar-brand fw-bold d-flex align-items-center gap-2">
+      <span class="d-inline-flex align-items-center justify-content-center rounded-3 text-white" style="width:36px;height:36px;background:linear-gradient(145deg,#7C3AED,#4C1D95);font-size:12px;font-weight:800;">SC</span>
+      Stock Counter
+    </span>
+    <div class="d-flex align-items-center gap-2 ms-auto">
+      <span class="badge rounded-pill text-bg-light border d-flex align-items-center px-3 py-2">
+        <span class="dot" id="statusDot"></span><span id="statusText">Connecting…</span>
+      </span>
+      <button class="btn btn-sm btn-outline-secondary" onclick="openSettings()" title="Settings"><i class="bi bi-gear-fill"></i></button>
+    </div>
+  </div>
+</nav>
+
+<div class="container py-4" style="max-width:760px;">
+
+  <!-- FIND / SCAN -->
+  <div class="card mb-3">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+      <span class="text-uppercase small fw-bold text-secondary"><i class="bi bi-search"></i> Find Item</span>
+      <span class="badge text-bg-primary-subtle text-primary-emphasis" id="resultCount">0 items loaded</span>
+    </div>
+    <div class="card-body">
+      <button class="btn btn-lg w-100 mb-3 text-white" style="background:linear-gradient(145deg,#7C3AED,#4C1D95);" onclick="openScanModal()">
+        <i class="bi bi-upc-scan"></i> Scan Barcode
+      </button>
+      <div class="input-group mb-2">
+        <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+        <input type="text" class="form-control" id="searchInput" placeholder="Or search by name, item code, or UPC…" oninput="onSearchInput()" autocomplete="off">
+      </div>
+      <div class="list-group" id="resultList" style="max-height:280px;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- ADJUST STOCK -->
+  <div class="card mb-3 d-none" id="adjustCard">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+      <span class="text-uppercase small fw-bold text-secondary"><i class="bi bi-boxes"></i> Adjust Stock</span>
+      <button class="btn btn-sm btn-link text-secondary text-decoration-none" onclick="clearSelection()"><i class="bi bi-x-lg"></i> Close</button>
+    </div>
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-start mb-3 gap-3">
+        <div class="min-w-0">
+          <div class="fw-bold text-truncate" id="adjItemName">—</div>
+          <div class="text-secondary small font-mono" id="adjItemMeta">—</div>
+        </div>
+        <div class="text-end flex-shrink-0">
+          <div class="text-secondary small text-uppercase">Current Stock</div>
+          <div class="fs-3 fw-bold" id="adjCurrentStock">0</div>
+        </div>
+      </div>
+
+      <ul class="nav nav-pills nav-fill mb-3" id="adjModeTabs">
+        <li class="nav-item"><button type="button" class="nav-link active" data-mode="add" onclick="setAdjMode('add')"><i class="bi bi-plus-lg"></i> Add</button></li>
+        <li class="nav-item"><button type="button" class="nav-link" data-mode="remove" onclick="setAdjMode('remove')"><i class="bi bi-dash-lg"></i> Remove</button></li>
+        <li class="nav-item"><button type="button" class="nav-link" data-mode="set" onclick="setAdjMode('set')"><i class="bi bi-pencil"></i> Set To</button></li>
+      </ul>
+
+      <div class="d-flex gap-2 flex-wrap mb-3" id="quickChips"></div>
+
+      <div class="input-group input-group-lg mb-2">
+        <input type="number" class="form-control text-center" id="adjAmount" value="1" min="0" oninput="updateAdjPreview()">
+        <button class="btn btn-primary" onclick="applyAdjustment()"><i class="bi bi-check2-circle"></i> Apply</button>
+      </div>
+      <div class="text-secondary small font-mono" id="adjPreview"></div>
+    </div>
+  </div>
+
+  <!-- LOW STOCK -->
+  <div class="card mb-3">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+      <span class="text-uppercase small fw-bold text-secondary"><i class="bi bi-exclamation-triangle"></i> Low Stock</span>
+      <span class="badge text-bg-danger" id="lowStockCount">0</span>
+    </div>
+    <div class="list-group list-group-flush" id="lowStockList" style="max-height:260px;overflow-y:auto;"></div>
+  </div>
+
+  <!-- SESSION LOG -->
+  <div class="card mb-3">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+      <span class="text-uppercase small fw-bold text-secondary"><i class="bi bi-clock-history"></i> Session Log</span>
+      <button class="btn btn-sm btn-outline-secondary" onclick="clearSessionLog()">Clear</button>
+    </div>
+    <div class="list-group list-group-flush" id="sessionLogList" style="max-height:360px;overflow-y:auto;"></div>
+  </div>
+
+</div>
+
+<!-- SCAN MODAL -->
+<div class="modal fade" id="scanModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-upc-scan"></i> Scan Barcode</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body text-center">
+        <div class="ratio ratio-4x3 bg-dark rounded overflow-hidden mb-2">
+          <video id="scanVideo" playsinline muted autoplay></video>
+        </div>
+        <div class="small text-secondary mb-2" id="scanStatus">Point the camera at a barcode…</div>
+        <div class="d-flex gap-2 justify-content-center flex-wrap">
+          <select class="form-select form-select-sm w-auto d-none" id="cameraSelect" onchange="restartScanningWithDevice(this.value)"></select>
+          <button type="button" class="btn btn-sm btn-outline-secondary" onclick="startScanning()"><i class="bi bi-arrow-repeat"></i> Try Again</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS MODAL -->
+<div class="modal fade" id="settingsModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">Settings</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="d-flex justify-content-between border-bottom py-2"><span class="small text-secondary">Status</span><span class="small fw-bold font-mono" id="settingsOnlineState">—</span></div>
+        <div class="d-flex justify-content-between border-bottom py-2"><span class="small text-secondary">Firestore project</span><span class="small fw-bold font-mono" id="settingsProjectId">—</span></div>
+        <div class="d-flex justify-content-between border-bottom py-2"><span class="small text-secondary">Items loaded</span><span class="small fw-bold font-mono" id="settingsProdCount">0</span></div>
+        <div class="d-flex justify-content-between border-bottom py-2"><span class="small text-secondary">Below threshold</span><span class="small fw-bold font-mono" id="settingsLowCount">0</span></div>
+        <div class="d-flex justify-content-between py-2"><span class="small text-secondary">Waiting to sync</span><span class="small fw-bold font-mono" id="settingsQueueCount">0</span></div>
+        <p class="small text-secondary mt-3 mb-0" style="line-height:1.6;">
+          Stock Counter reads and writes the same Firestore <code>catalog</code> collection as Inflow and Barcode Maker.
+          Each adjustment is applied against the very latest stock value at the moment it's saved, so it's safe even
+          if someone else is counting at the same time. If you're offline, adjustments are queued on this device and
+          applied automatically once you're back online.
+        </p>
+        <p class="small text-secondary mt-2 mb-0" style="line-height:1.6;">
+          <i class="bi bi-camera"></i> Camera scanning needs this page loaded over <code>https://</code> (or
+          <code>http://localhost</code>) — opening the HTML file directly won't allow camera access. Host it on any
+          secure web server and the Scan Barcode button will work.
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-danger" onclick="clearLocalCache()"><i class="bi bi-trash3"></i> Clear Local Cache</button>
+        <button class="btn btn-primary" onclick="manualSync()"><i class="bi bi-arrow-repeat"></i> Refresh & Sync</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="loadingOverlay">
+  <div class="bg-white rounded-4 p-4 shadow d-flex flex-column align-items-center gap-2">
+    <div class="spinner-border text-primary" role="status"></div>
+    <span class="small fw-bold text-secondary">Please wait…</span>
+  </div>
+</div>
+<div id="toastStack" class="position-fixed bottom-0 start-50 translate-middle-x p-3"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
+
+<script>
+// ============================================================
+// SHARED HELPERS
+// ============================================================
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+function showToast(msg, type) {
+  const stack = document.getElementById('toastStack');
+  const el = document.createElement('div');
+  el.className = 'toast align-items-center text-white border-0 show mb-2 ' +
+    (type === 'error' ? 'bg-danger' : type === 'warn' ? 'bg-warning text-dark' : 'bg-primary');
+  el.innerHTML = '<div class="d-flex"><div class="toast-body">' + esc(msg) + '</div></div>';
+  stack.appendChild(el);
+  setTimeout(function () { el.style.transition = 'opacity .25s'; el.style.opacity = '0'; setTimeout(function () { el.remove(); }, 260); }, 2800);
+}
+function setLoading(on) { document.getElementById('loadingOverlay').classList.toggle('show', on); }
+
+// Formats an item's package size + case count for easy scanning at a glance,
+// e.g. "1kg × 24". Falls back gracefully if either piece is missing.
+function packLabel(p) {
+  const pack = (p.pack || '').toString().trim();
+  const cs = parseFloat(p.casesize);
+  if (pack && cs) return pack + ' × ' + cs;
+  if (pack) return pack;
+  if (cs) return '× ' + cs;
+  return '';
+}
+
+// ============================================================
+// FIREBASE — same project as Inflow / Sales Order / Barcode Maker
+// This app READS and WRITES the "catalog" collection's stock field only.
+// ============================================================
+const firebaseConfig = {
+  apiKey: 'AIzaSyCIX2Nf6BA6qlHW3dzkx0TUPzNplDi5GLc',
+  projectId: 'invoiceflow-aee21'
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+const LS_PRODUCTS   = 'sc_products';
+const LS_QUEUE       = 'sc_queue';
+const LS_SESSIONLOG = 'sc_sessionlog';
+
+let products = [];       // from Inflow's "catalog" collection
+let selectedItem = null;
+let adjMode = 'add';
+let sessionLog = [];
+
+// ============================================================
+// INIT
+// ============================================================
+document.addEventListener('DOMContentLoaded', function () {
+  try { products = JSON.parse(localStorage.getItem(LS_PRODUCTS) || '[]'); } catch (e) { products = []; }
+  try { sessionLog = JSON.parse(localStorage.getItem(LS_SESSIONLOG) || '[]'); } catch (e) { sessionLog = []; }
+  updateConnStatus();
+  renderResults([]);
+  renderLowStock();
+  renderSessionLog();
+  renderQueueBadge();
+  window.addEventListener('online', function () { updateConnStatus(); flushQueue(); refreshCatalog(); });
+  window.addEventListener('offline', updateConnStatus);
+  refreshCatalog();
+  setInterval(function () { if (navigator.onLine) flushQueue(); }, 20000);
+});
+
+async function refreshCatalog() {
+  if (!navigator.onLine) { updateConnStatus(); return; }
+  try {
+    setSyncing(true);
+    const snap = await db.collection('catalog').doc('data').get();
+    if (snap.exists) {
+      const data = snap.data();
+      if (Array.isArray(data.records)) {
+        products = data.records;
+        localStorage.setItem(LS_PRODUCTS, JSON.stringify(products));
+      }
+    }
+    setSyncing(false);
+    updateConnStatus();
+    document.getElementById('resultCount').textContent = products.length + ' items loaded';
+    onSearchInput();
+    renderLowStock();
+  } catch (err) {
+    console.error('Catalog load error:', err);
+    setSyncing(false);
+    updateConnStatus();
+    showToast('Could not reach Firestore — showing cached items', 'warn');
+  }
+}
+
+// ============================================================
+// TRANSACTIONAL STOCK UPDATE
+// Reads the very latest catalog doc right before writing, so a concurrent
+// edit made by Inflow (or another Stock Counter session) is never clobbered.
+// ============================================================
+async function applyStockChange(itemId, mode, amount) {
+  const ref = db.collection('catalog').doc('data');
+  let beforeQty = 0, afterQty = 0, itemDesc = '';
+  await db.runTransaction(async function (tx) {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new Error('Catalog not found');
+    const data = snap.data();
+    const records = Array.isArray(data.records) ? data.records.slice() : [];
+    const idx = records.findIndex(function (r) { return r.id === itemId; });
+    if (idx < 0) throw new Error('Item no longer exists in the catalog');
+    const item = Object.assign({}, records[idx]);
+    const current = parseFloat(item.stock) || 0;
+    beforeQty = current;
+    itemDesc = item.desc || '';
+    let next = current;
+    if (mode === 'add') next = current + amount;
+    else if (mode === 'remove') next = current - amount;
+    else if (mode === 'set') next = amount;
+    next = Math.max(0, next);
+    afterQty = next;
+    item.stock = next;
+    records[idx] = item;
+    tx.set(ref, Object.assign({}, data, { records: records }));
+  });
+  return { beforeQty: beforeQty, afterQty: afterQty, itemDesc: itemDesc };
+}
+
+// ============================================================
+// OFFLINE QUEUE
+// ============================================================
+function getQueue() { try { return JSON.parse(localStorage.getItem(LS_QUEUE) || '[]'); } catch (e) { return []; } }
+function setQueue(q) { localStorage.setItem(LS_QUEUE, JSON.stringify(q)); renderQueueBadge(); }
+function queueAdjustment(a) { const q = getQueue(); q.push(a); setQueue(q); }
+function renderQueueBadge() {
+  const el = document.getElementById('settingsQueueCount');
+  if (el) el.textContent = getQueue().length;
+}
+
+async function flushQueue() {
+  if (!navigator.onLine) return;
+  let queueArr = getQueue();
+  if (queueArr.length === 0) return;
+  setSyncing(true);
+  while (queueArr.length) {
+    const a = queueArr[0];
+    try {
+      await applyStockChange(a.itemId, a.mode, a.amount);
+      queueArr.shift();
+      setQueue(queueArr);
+    } catch (err) {
+      console.error('Sync failed, will retry later:', err);
+      break;
+    }
+  }
+  setSyncing(false);
+  await refreshCatalog();
+}
+
+// ============================================================
+// SEARCH & SELECT
+// ============================================================
+function onSearchInput() {
+  const q = document.getElementById('searchInput').value.trim().toLowerCase();
+  if (!q) { renderResults([]); return; }
+  const pool = products.filter(function (p) {
+    return (p.desc || '').toLowerCase().indexOf(q) >= 0 ||
+      (p.itemno || '').toLowerCase().indexOf(q) >= 0 ||
+      (p.upc || '').toLowerCase().indexOf(q) >= 0 ||
+      (p.pack || '').toLowerCase().indexOf(q) >= 0;
+  }).slice(0, 25);
+  renderResults(pool);
+}
+function renderResults(list) {
+  const wrap = document.getElementById('resultList');
+  const q = document.getElementById('searchInput').value.trim();
+  if (!q) { wrap.innerHTML = '<div class="list-group-item text-center text-secondary small py-3">Start typing, or scan a barcode above</div>'; return; }
+  if (list.length === 0) { wrap.innerHTML = '<div class="list-group-item text-center text-secondary small py-3">No matching items</div>'; return; }
+  wrap.innerHTML = list.map(function (p) {
+    const stock = parseFloat(p.stock) || 0, threshold = parseFloat(p.threshold) || 0;
+    const low = threshold > 0 && stock <= threshold;
+    return '<div class="list-group-item clickable d-flex justify-content-between align-items-center gap-2" onclick="selectItem(\'' + p.id + '\')">' +
+      '<div class="min-w-0"><div class="fw-semibold small text-truncate">' + esc(p.desc || 'Unnamed item') + '</div>' +
+      '<div class="text-secondary small font-mono">' + esc(p.itemno || '—') + (p.upc ? ' · UPC ' + esc(p.upc) : '') + (packLabel(p) ? ' · ' + esc(packLabel(p)) : '') + '</div></div>' +
+      '<span class="badge ' + (low ? 'text-bg-danger' : 'text-bg-light border') + ' flex-shrink-0">' + stock + '</span>' +
+    '</div>';
+  }).join('');
+}
+
+function selectItem(itemId) {
+  const p = products.find(function (x) { return x.id === itemId; });
+  if (!p) { showToast('Item not found', 'error'); return; }
+  selectedItem = p;
+  document.getElementById('adjustCard').classList.remove('d-none');
+  document.getElementById('adjItemName').textContent = p.desc || 'Unnamed item';
+  document.getElementById('adjItemMeta').textContent = (p.itemno || '—') + (p.upc ? ' · UPC ' + p.upc : '') + (packLabel(p) ? ' · ' + packLabel(p) : '');
+  document.getElementById('adjCurrentStock').textContent = parseFloat(p.stock) || 0;
+  setAdjMode('add');
+  document.getElementById('adjustCard').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function clearSelection() {
+  selectedItem = null;
+  document.getElementById('adjustCard').classList.add('d-none');
+}
+
+// ============================================================
+// ADJUST STOCK PANEL
+// ============================================================
+function setAdjMode(mode) {
+  adjMode = mode;
+  document.querySelectorAll('#adjModeTabs .nav-link').forEach(function (b) { b.classList.toggle('active', b.dataset.mode === mode); });
+  const chips = document.getElementById('quickChips');
+  const amountInput = document.getElementById('adjAmount');
+  if (mode === 'set') {
+    chips.innerHTML = '';
+    amountInput.value = selectedItem ? (parseFloat(selectedItem.stock) || 0) : 0;
+  } else {
+    const caseSize = selectedItem && selectedItem.casesize ? parseFloat(selectedItem.casesize) : null;
+    const vals = [1, 5, 10];
+    if (caseSize && vals.indexOf(caseSize) === -1) vals.push(caseSize);
+    chips.innerHTML = vals.map(function (v) {
+      return '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="setAdjAmount(' + v + ')">' + (mode === 'add' ? '+' : '−') + v + '</button>';
+    }).join('');
+    amountInput.value = 1;
+  }
+  updateAdjPreview();
+}
+function setAdjAmount(v) { document.getElementById('adjAmount').value = v; updateAdjPreview(); }
+
+function updateAdjPreview() {
+  const preview = document.getElementById('adjPreview');
+  if (!selectedItem) { preview.textContent = ''; return; }
+  const current = parseFloat(selectedItem.stock) || 0;
+  const amt = parseFloat(document.getElementById('adjAmount').value) || 0;
+  let next = current;
+  if (adjMode === 'add') next = current + amt;
+  else if (adjMode === 'remove') next = current - amt;
+  else next = amt;
+  const clamped = Math.max(0, next);
+  preview.textContent = current + ' → ' + clamped + (next < 0 ? ' (stock cannot go below 0)' : '');
+}
+
+async function applyAdjustment() {
+  if (!selectedItem) return;
+  const amt = parseFloat(document.getElementById('adjAmount').value);
+  if (isNaN(amt) || amt < 0) { showToast('Enter a valid quantity', 'warn'); return; }
+  const itemId = selectedItem.id, itemDesc = selectedItem.desc || '', mode = adjMode;
+
+  setLoading(true);
+  try {
+    let result;
+    if (navigator.onLine) {
+      result = await applyStockChange(itemId, mode, amt);
+    } else {
+      const current = parseFloat(selectedItem.stock) || 0;
+      let next = mode === 'add' ? current + amt : mode === 'remove' ? current - amt : amt;
+      next = Math.max(0, next);
+      result = { beforeQty: current, afterQty: next, itemDesc: itemDesc };
+      queueAdjustment({ itemId: itemId, mode: mode, amount: amt });
+    }
+
+    const idx = products.findIndex(function (p) { return p.id === itemId; });
+    if (idx >= 0) { products[idx].stock = result.afterQty; localStorage.setItem(LS_PRODUCTS, JSON.stringify(products)); }
+    selectedItem.stock = result.afterQty;
+    document.getElementById('adjCurrentStock').textContent = result.afterQty;
+    updateAdjPreview();
+
+    addSessionLog({ itemId: itemId, itemDesc: itemDesc, mode: mode, amount: amt, before: result.beforeQty, after: result.afterQty, synced: navigator.onLine, ts: Date.now() });
+    showToast(itemDesc + ': ' + result.beforeQty + ' → ' + result.afterQty, 'ok');
+    onSearchInput();
+    renderLowStock();
+  } catch (err) {
+    console.error(err);
+    showToast('Could not update stock: ' + err.message, 'error');
+  }
+  setLoading(false);
+}
+
+// ============================================================
+// LOW STOCK
+// ============================================================
+function renderLowStock() {
+  const wrap = document.getElementById('lowStockList');
+  const low = products.filter(function (p) {
+    const stock = parseFloat(p.stock) || 0, threshold = parseFloat(p.threshold) || 0;
+    return threshold > 0 && stock <= threshold;
+  }).sort(function (a, b) { return (parseFloat(a.stock) || 0) - (parseFloat(b.stock) || 0); });
+  document.getElementById('lowStockCount').textContent = low.length;
+  document.getElementById('settingsLowCount').textContent = low.length;
+  if (low.length === 0) { wrap.innerHTML = '<div class="list-group-item text-center text-secondary small py-3">Nothing below threshold</div>'; return; }
+  wrap.innerHTML = low.slice(0, 25).map(function (p) {
+    return '<div class="list-group-item clickable d-flex justify-content-between align-items-center gap-2" onclick="selectItem(\'' + p.id + '\')">' +
+      '<div class="min-w-0"><div class="fw-semibold small text-truncate">' + esc(p.desc || '') + '</div>' +
+      '<div class="text-secondary small font-mono">' + esc(p.itemno || '') + (packLabel(p) ? ' · ' + esc(packLabel(p)) : '') + '</div></div>' +
+      '<span class="badge text-bg-danger flex-shrink-0">' + (parseFloat(p.stock) || 0) + ' / ' + (parseFloat(p.threshold) || 0) + '</span>' +
+    '</div>';
+  }).join('');
+}
+
+// ============================================================
+// SESSION LOG
+// ============================================================
+function saveSessionLog() { localStorage.setItem(LS_SESSIONLOG, JSON.stringify(sessionLog.slice(0, 100))); }
+function addSessionLog(entry) {
+  entry.id = 'log-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+  sessionLog.unshift(entry);
+  saveSessionLog();
+  renderSessionLog();
+}
+function renderSessionLog() {
+  const wrap = document.getElementById('sessionLogList');
+  if (sessionLog.length === 0) { wrap.innerHTML = '<div class="list-group-item text-center text-secondary small py-4">No adjustments yet this session</div>'; return; }
+  wrap.innerHTML = sessionLog.map(function (e) {
+    const deltaTxt = e.mode === 'set' ? 'Set' : (e.mode === 'add' ? '+' + e.amount : '−' + e.amount);
+    const time = new Date(e.ts).toLocaleTimeString();
+    return '<div class="list-group-item d-flex align-items-center gap-2' + (e.undone ? ' opacity-50' : '') + '">' +
+      '<div class="flex-grow-1 min-w-0">' +
+        '<div class="fw-semibold small text-truncate">' + esc(e.itemDesc) + (e.undone ? ' <span class="badge text-bg-secondary">Undone</span>' : '') + '</div>' +
+        '<div class="text-secondary small font-mono">' + e.before + ' → ' + e.after + ' (' + deltaTxt + ') · ' + time + (!e.synced ? ' · <span class="text-warning">pending sync</span>' : '') + '</div>' +
+      '</div>' +
+      (!e.undone ? '<button class="btn btn-sm btn-outline-secondary flex-shrink-0" onclick="undoLog(\'' + e.id + '\')">Undo</button>' : '') +
+    '</div>';
+  }).join('');
+}
+function clearSessionLog() {
+  if (sessionLog.length === 0) return;
+  if (!confirm('Clear the session log? This does not change any stock levels.')) return;
+  sessionLog = [];
+  saveSessionLog();
+  renderSessionLog();
+}
+
+async function undoLog(logId) {
+  const entry = sessionLog.find(function (e) { return e.id === logId; });
+  if (!entry || entry.undone) return;
+  setLoading(true);
+  try {
+    if (entry.synced) {
+      if (!navigator.onLine) { showToast('You are offline — reconnect to undo a synced change', 'warn'); setLoading(false); return; }
+      await applyStockChange(entry.itemId, 'set', entry.before);
+    } else {
+      let q = getQueue();
+      const pos = q.findIndex(function (a) { return a.itemId === entry.itemId && a.amount === entry.amount && a.mode === entry.mode; });
+      if (pos >= 0) q.splice(pos, 1);
+      setQueue(q);
+    }
+    entry.undone = true;
+    saveSessionLog();
+    renderSessionLog();
+
+    const idx = products.findIndex(function (p) { return p.id === entry.itemId; });
+    if (idx >= 0) { products[idx].stock = entry.before; localStorage.setItem(LS_PRODUCTS, JSON.stringify(products)); }
+    if (selectedItem && selectedItem.id === entry.itemId) {
+      selectedItem.stock = entry.before;
+      document.getElementById('adjCurrentStock').textContent = entry.before;
+      updateAdjPreview();
+    }
+    showToast('Reverted ' + entry.itemDesc + ' to ' + entry.before, 'ok');
+    onSearchInput();
+    renderLowStock();
+  } catch (err) {
+    showToast('Could not undo: ' + err.message, 'error');
+  }
+  setLoading(false);
+}
+
+// ============================================================
+// CAMERA BARCODE SCANNING (ZXing)
+// ============================================================
+let codeReader = null;
+let lastScan = { code: '', ts: 0 };
+
+function openScanModal() {
+  const modalEl = document.getElementById('scanModal');
+  document.getElementById('scanStatus').textContent = 'Point the camera at a barcode…';
+  document.getElementById('cameraSelect').classList.add('d-none');
+  document.getElementById('cameraSelect').innerHTML = '';
+  const modal = new bootstrap.Modal(modalEl);
+  modal.show();
+  modalEl.addEventListener('shown.bs.modal', function () { startScanning(); }, { once: true });
+  modalEl.addEventListener('hidden.bs.modal', stopScanning, { once: true });
+}
+
+async function startScanning() {
+  const statusEl = document.getElementById('scanStatus');
+  stopScanning(); // release any previous camera/stream before trying again
+
+  // Most common cause of "camera unavailable": the page isn't served over
+  // a secure origin (e.g. opened directly as a file, or plain http://).
+  if (!window.isSecureContext) {
+    statusEl.textContent = 'Camera access needs this page to be served over https:// (or http://localhost) — opening the file directly blocks it. Use search instead.';
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    statusEl.textContent = 'This browser does not support camera access — use search instead.';
+    return;
+  }
+  if (typeof ZXing === 'undefined' || !ZXing.BrowserMultiFormatReader) {
+    statusEl.textContent = 'Barcode scanner library failed to load — check your connection and tap Try Again.';
+    return;
+  }
+
+  statusEl.textContent = 'Requesting camera access…';
+  codeReader = new ZXing.BrowserMultiFormatReader();
+  const onDecode = function (result) { if (result) handleScanResult(result.getText()); };
+
+  // Attempt 1: preferred rear camera
+  try {
+    await codeReader.decodeFromConstraints({ video: { facingMode: { ideal: 'environment' } }, audio: false }, 'scanVideo', onDecode);
+    statusEl.textContent = 'Point the camera at a barcode…';
+    populateCameraList();
+    return;
+  } catch (err1) { console.warn('Rear-camera scan attempt failed:', err1); }
+
+  // Attempt 2: enumerate cameras and pick one explicitly (helps when a device
+  // has multiple cameras but no "environment" facing camera is reported)
+  try {
+    const devices = await codeReader.listVideoInputDevices();
+    if (devices && devices.length) {
+      const preferred = devices.find(function (d) { return /back|rear|environment/i.test(d.label); }) || devices[devices.length - 1];
+      await codeReader.decodeFromVideoDevice(preferred.deviceId, 'scanVideo', onDecode);
+      statusEl.textContent = 'Point the camera at a barcode…';
+      populateCameraList(devices, preferred.deviceId);
+      return;
+    }
+  } catch (err2) { console.warn('Device-list scan attempt failed:', err2); }
+
+  // Attempt 3: any camera at all, no facingMode preference
+  try {
+    await codeReader.decodeFromConstraints({ video: true, audio: false }, 'scanVideo', onDecode);
+    statusEl.textContent = 'Point the camera at a barcode…';
+    populateCameraList();
+  } catch (err3) {
+    console.error('Camera fully unavailable:', err3);
+    statusEl.textContent = describeCameraError(err3) + ' — use search instead, or tap Try Again.';
+  }
+}
+
+// Lets the person switch cameras manually if the device has more than one
+// (e.g. picked the wrong lens on a phone with multiple rear cameras).
+async function populateCameraList(devices, activeId) {
+  try {
+    const list = devices || (codeReader ? await codeReader.listVideoInputDevices() : []);
+    const sel = document.getElementById('cameraSelect');
+    if (!list || list.length < 2) { sel.classList.add('d-none'); return; }
+    sel.innerHTML = list.map(function (d, i) {
+      return '<option value="' + d.deviceId + '"' + (d.deviceId === activeId ? ' selected' : '') + '>' + esc(d.label || ('Camera ' + (i + 1))) + '</option>';
+    }).join('');
+    sel.classList.remove('d-none');
+  } catch (e) { /* device listing is a nicety, not required */ }
+}
+
+async function restartScanningWithDevice(deviceId) {
+  if (!deviceId) return;
+  const statusEl = document.getElementById('scanStatus');
+  if (codeReader) { try { codeReader.reset(); } catch (e) {} }
+  else { codeReader = new ZXing.BrowserMultiFormatReader(); }
+  try {
+    await codeReader.decodeFromVideoDevice(deviceId, 'scanVideo', function (result) { if (result) handleScanResult(result.getText()); });
+    statusEl.textContent = 'Point the camera at a barcode…';
+  } catch (err) {
+    statusEl.textContent = describeCameraError(err) + ' — try a different camera or use search instead.';
+  }
+}
+
+function describeCameraError(err) {
+  const name = err && err.name;
+  if (name === 'NotAllowedError' || name === 'PermissionDeniedError') return 'Camera permission was denied';
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'No camera was found on this device';
+  if (name === 'NotReadableError' || name === 'TrackStartError') return 'The camera is already in use by another app';
+  if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') return 'No camera matched the requested settings';
+  return 'Camera unavailable' + (err && err.message ? ' (' + err.message + ')' : '');
+}
+
+function stopScanning() {
+  if (codeReader) { try { codeReader.reset(); } catch (e) {} codeReader = null; }
+  const video = document.getElementById('scanVideo');
+  if (video && video.srcObject) {
+    try { video.srcObject.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+    video.srcObject = null;
+  }
+}
+
+function handleScanResult(code) {
+  const now = Date.now();
+  if (code === lastScan.code && (now - lastScan.ts) < 2000) return; // debounce repeated reads of the same code
+  lastScan = { code: code, ts: now };
+  const item = findItemByCode(code);
+  if (!item) {
+    document.getElementById('scanStatus').textContent = 'No catalog item matches "' + code + '" — keep scanning or search manually.';
+    return;
+  }
+  const modalEl = document.getElementById('scanModal');
+  const instance = bootstrap.Modal.getInstance(modalEl);
+  if (instance) instance.hide();
+  selectItem(item.id);
+  showToast(item.desc + ' found', 'ok');
+}
+function findItemByCode(code) {
+  const clean = (code || '').trim();
+  if (!clean) return null;
+  return products.find(function (p) { return (p.upc || '').trim() === clean; }) ||
+    products.find(function (p) { return (p.itemno || '').trim() === clean; });
+}
+
+// ============================================================
+// SETTINGS
+// ============================================================
+function openSettings() {
+  document.getElementById('settingsProjectId').textContent = firebaseConfig.projectId;
+  document.getElementById('settingsProdCount').textContent = products.length;
+  document.getElementById('settingsOnlineState').textContent = navigator.onLine ? 'Online' : 'Offline';
+  renderLowStock();
+  renderQueueBadge();
+  new bootstrap.Modal(document.getElementById('settingsModal')).show();
+}
+function manualSync() {
+  if (!navigator.onLine) { showToast('You are offline', 'warn'); return; }
+  showToast('Syncing…', 'ok');
+  flushQueue().then(refreshCatalog).then(openSettings);
+}
+function clearLocalCache() {
+  if (!confirm('Clear the locally cached item list? This does not affect Firestore, and any un-synced adjustments are kept.')) return;
+  localStorage.removeItem(LS_PRODUCTS);
+  showToast('Local cache cleared', 'ok');
+  refreshCatalog().then(openSettings);
+}
+
+// ============================================================
+// STATUS HELPERS
+// ============================================================
+function updateConnStatus() {
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusText');
+  const banner = document.getElementById('connBanner');
+  if (navigator.onLine) {
+    dot.className = 'dot dot-green'; txt.textContent = 'Online'; banner.classList.add('d-none');
+  } else {
+    dot.className = 'dot dot-red'; txt.textContent = 'Offline';
+    banner.textContent = 'You are offline. Adjustments are saved on this device and will sync automatically once you reconnect.';
+    banner.classList.remove('d-none');
+  }
+}
+function setSyncing(on) {
+  if (on) { document.getElementById('statusDot').className = 'dot dot-amber'; document.getElementById('statusText').textContent = 'Syncing…'; }
+  else { updateConnStatus(); }
+}
+</script>
+</body>
+</html>
