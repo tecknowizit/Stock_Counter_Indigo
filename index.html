@@ -280,15 +280,25 @@ async function refreshCatalog() {
 // TRANSACTIONAL STOCK UPDATE
 // Reads the very latest catalog doc right before writing, so a concurrent
 // edit made by Inflow (or another Stock Counter session) is never clobbered.
+// Also writes a matching entry into the SAME "invlog" collection that the
+// main Inflow app's Inventory Movement Log reads from, in the same
+// transaction as the stock change itself — so every adjustment made here
+// shows up there too, and the two writes can never end up out of sync
+// with each other (either both succeed or neither does).
 // ============================================================
+function scUid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 5); }
+
 async function applyStockChange(itemId, mode, amount) {
-  const ref = db.collection('catalog').doc('data');
+  const catRef = db.collection('catalog').doc('data');
+  const logRef = db.collection('invlog').doc('data');
   let beforeQty = 0, afterQty = 0, itemDesc = '';
   await db.runTransaction(async function (tx) {
-    const snap = await tx.get(ref);
-    if (!snap.exists) throw new Error('Catalog not found');
-    const data = snap.data();
-    const records = Array.isArray(data.records) ? data.records.slice() : [];
+    // All reads must happen before any writes in a Firestore transaction.
+    const catSnap = await tx.get(catRef);
+    const logSnap = await tx.get(logRef);
+    if (!catSnap.exists) throw new Error('Catalog not found');
+    const catData = catSnap.data();
+    const records = Array.isArray(catData.records) ? catData.records.slice() : [];
     const idx = records.findIndex(function (r) { return r.id === itemId; });
     if (idx < 0) throw new Error('Item no longer exists in the catalog');
     const item = Object.assign({}, records[idx]);
@@ -299,11 +309,33 @@ async function applyStockChange(itemId, mode, amount) {
     if (mode === 'add') next = current + amount;
     else if (mode === 'remove') next = current - amount;
     else if (mode === 'set') next = amount;
-    next = Math.max(0, next);
+    // No floor at zero — the main app intentionally allows negative stock
+    // to track backorders, and clamping here would silently erase that.
     afterQty = next;
     item.stock = next;
     records[idx] = item;
-    tx.set(ref, Object.assign({}, data, { records: records }));
+    tx.set(catRef, Object.assign({}, catData, { records: records }));
+
+    // Mirror this change into the shared Movement Log, in the exact same
+    // shape and "type" values the main app's own manual adjustments use
+    // (adj_add / adj_remove / adj_set), so it renders identically there —
+    // just with ref "Stock Counter" instead of "Manual" so it's clear
+    // which tool made the change.
+    const logType = mode === 'add' ? 'adj_add' : mode === 'remove' ? 'adj_remove' : 'adj_set';
+    const change = mode === 'set' ? (afterQty - beforeQty) : (mode === 'add' ? amount : -amount);
+    const logData = logSnap.exists ? logSnap.data() : { records: [] };
+    const logRecords = Array.isArray(logData.records) ? logData.records.slice() : [];
+    logRecords.unshift({
+      id: scUid(),
+      date: new Date().toISOString().slice(0, 10),
+      type: logType,
+      catId: itemId,
+      ref: 'Stock Counter',
+      change: change,
+      balance: afterQty,
+      notes: 'Stock Counter — ' + mode
+    });
+    tx.set(logRef, Object.assign({}, logData, { records: logRecords }));
   });
   return { beforeQty: beforeQty, afterQty: afterQty, itemDesc: itemDesc };
 }
@@ -319,23 +351,31 @@ function renderQueueBadge() {
   if (el) el.textContent = getQueue().length;
 }
 
+let _flushingQueue = false;
+
 async function flushQueue() {
+  if (_flushingQueue) return; // already running from another trigger (timer / online event / manual sync)
   if (!navigator.onLine) return;
   let queueArr = getQueue();
   if (queueArr.length === 0) return;
+  _flushingQueue = true;
   setSyncing(true);
-  while (queueArr.length) {
-    const a = queueArr[0];
-    try {
-      await applyStockChange(a.itemId, a.mode, a.amount);
-      queueArr.shift();
-      setQueue(queueArr);
-    } catch (err) {
-      console.error('Sync failed, will retry later:', err);
-      break;
+  try {
+    while (queueArr.length) {
+      const a = queueArr[0];
+      try {
+        await applyStockChange(a.itemId, a.mode, a.amount);
+        queueArr.shift();
+        setQueue(queueArr);
+      } catch (err) {
+        console.error('Sync failed, will retry later:', err);
+        break;
+      }
     }
+  } finally {
+    _flushingQueue = false;
+    setSyncing(false);
   }
-  setSyncing(false);
   await refreshCatalog();
 }
 
@@ -418,16 +458,29 @@ function updateAdjPreview() {
   if (adjMode === 'add') next = current + amt;
   else if (adjMode === 'remove') next = current - amt;
   else next = amt;
-  const clamped = Math.max(0, next);
-  preview.textContent = current + ' → ' + clamped + (next < 0 ? ' (stock cannot go below 0)' : '');
+  // No floor at zero here — the main Inflow app intentionally allows negative
+  // stock to track backorders (invoicing more than is on hand). Clamping to
+  // 0 here would silently erase that backorder information the moment
+  // someone uses Stock Counter to adjust the same item.
+  preview.textContent = current + ' → ' + next;
 }
 
+// Same double-submission risk found and fixed in the main Inflow app:
+// with no guard, a rapid double-click (or double-tap) on Apply would fire
+// two full adjustments — harmless for "Set", but for "Add"/"Remove" it
+// silently applies the amount twice. The loading overlay covers the
+// button visually, but that's not a guaranteed block against a second
+// click landing in the same instant, so this checks explicitly too.
+let _applyingAdjustment = false;
+
 async function applyAdjustment() {
+  if (_applyingAdjustment) return;
   if (!selectedItem) return;
   const amt = parseFloat(document.getElementById('adjAmount').value);
   if (isNaN(amt) || amt < 0) { showToast('Enter a valid quantity', 'warn'); return; }
   const itemId = selectedItem.id, itemDesc = selectedItem.desc || '', mode = adjMode;
 
+  _applyingAdjustment = true;
   setLoading(true);
   try {
     let result;
@@ -435,8 +488,9 @@ async function applyAdjustment() {
       result = await applyStockChange(itemId, mode, amt);
     } else {
       const current = parseFloat(selectedItem.stock) || 0;
+      // No floor at zero here either — see applyStockChange() for why:
+      // clamping would silently erase legitimate backorder values.
       let next = mode === 'add' ? current + amt : mode === 'remove' ? current - amt : amt;
-      next = Math.max(0, next);
       result = { beforeQty: current, afterQty: next, itemDesc: itemDesc };
       queueAdjustment({ itemId: itemId, mode: mode, amount: amt });
     }
@@ -455,6 +509,7 @@ async function applyAdjustment() {
     console.error(err);
     showToast('Could not update stock: ' + err.message, 'error');
   }
+  _applyingAdjustment = false;
   setLoading(false);
 }
 
@@ -512,13 +567,17 @@ function clearSessionLog() {
   renderSessionLog();
 }
 
+let _undoingLog = false;
+
 async function undoLog(logId) {
+  if (_undoingLog) return;
   const entry = sessionLog.find(function (e) { return e.id === logId; });
   if (!entry || entry.undone) return;
+  _undoingLog = true;
   setLoading(true);
   try {
     if (entry.synced) {
-      if (!navigator.onLine) { showToast('You are offline — reconnect to undo a synced change', 'warn'); setLoading(false); return; }
+      if (!navigator.onLine) { showToast('You are offline — reconnect to undo a synced change', 'warn'); _undoingLog = false; setLoading(false); return; }
       await applyStockChange(entry.itemId, 'set', entry.before);
     } else {
       let q = getQueue();
@@ -543,6 +602,7 @@ async function undoLog(logId) {
   } catch (err) {
     showToast('Could not undo: ' + err.message, 'error');
   }
+  _undoingLog = false;
   setLoading(false);
 }
 
